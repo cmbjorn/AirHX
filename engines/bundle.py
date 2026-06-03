@@ -19,24 +19,27 @@ from .heat_transfer import (
     lmtd, f_factor_crossflow, ntu_crossflow, HTCBreakdown,
 )
 
-_BAY_WIDTH_M    = 2.438    # standard 8-ft bay width [m]
-_RE_TURB        = 4000     # minimum Re for turbulent tube-side flow
-_PASSES_ALLOWED = [1, 2, 3, 4, 6, 8, 12]
-_MAX_BAYS       = 12       # hard upper bound on search
+_BAY_WIDTH_DEFAULT = 2.438  # standard 8-ft bay width [m] — configurable per design
+_RE_TURB           = 4000   # minimum Re for turbulent tube-side flow
+_PASSES_ALLOWED    = [1, 2, 3, 4, 6, 8, 12]
+_MAX_BAYS          = 12     # hard upper bound on search
+_G_AIR_MAX_WARN    = 12.0   # kg/m²s — above this warn for noise/vibration/ΔP
+_FAN_COV_MIN       = 0.40   # API 661 minimum fan coverage ratio
 
 
 # ── Geometry dataclass ────────────────────────────────────────────────────────
 
 @dataclass
 class BundleGeometry:
-    fin_type:    str
-    n_rows:      int
-    n_tubes_row: int    # per bay
-    n_bays:      int
-    L_tube_m:    float
-    n_passes:    int
-    fan_type:    str
-    n_fans_bay:  int = 2
+    fin_type:     str
+    n_rows:       int
+    n_tubes_row:  int     # per bay
+    n_bays:       int
+    L_tube_m:     float
+    n_passes:     int
+    fan_type:     str
+    bay_width_m:  float = 2.438   # configurable — 2.438 (8ft), 3.048 (10ft), 3.658 (12ft)
+    n_fans_bay:   int   = 2
 
     @property
     def n_tubes_total(self) -> int:
@@ -46,61 +49,99 @@ class BundleGeometry:
     def n_tubes_per_pass(self) -> int:
         return max(1, self.n_tubes_total // self.n_passes)
 
+    @property
+    def face_area_m2(self) -> float:
+        """Total bundle face area (through which air enters) [m²]."""
+        return self.n_bays * self.bay_width_m * self.L_tube_m
+
+    def fan_coverage(self, fan_diam_m: float) -> float:
+        """Fan coverage ratio: total fan sweep area / bundle face area [-]."""
+        import math
+        n_fans = self.n_bays * self.n_fans_bay
+        return n_fans * math.pi * (fan_diam_m / 2)**2 / max(self.face_area_m2, 1e-6)
+
 
 @dataclass
 class BundleDesignResult:
-    geom:         BundleGeometry
-    htc:          HTCBreakdown
-    Q_kW:         float
-    T_proc_in:    float
-    T_proc_out:   float
-    T_air_in:     float
-    T_air_out:    float
-    m_proc_kgs:   float
-    m_air_kgs:    float
-    G_air:        float
-    v_tube_ms:    float
-    Re_tube:      float
-    A_total_m2:   float
-    A_req_m2:     float
-    area_margin:  float
-    dP_air_Pa:    float
-    P_fan_kW:     float
-    n_passes_eff: int      # may be > user-requested if auto-adjusted
-    warnings:     list[str] = field(default_factory=list)
+    geom:            BundleGeometry
+    htc:             HTCBreakdown
+    Q_kW:            float
+    T_proc_in:       float
+    T_proc_out:      float
+    T_air_in:        float
+    T_air_out:       float
+    m_proc_kgs:      float
+    m_air_kgs:       float
+    G_air:           float
+    v_tube_ms:       float
+    Re_tube:         float
+    A_total_m2:      float
+    A_req_m2:        float
+    area_margin:     float
+    dP_air_Pa:       float
+    P_fan_kW:        float
+    n_passes_eff:    int
+    fan_diam_m:      float = 0.0     # recommended fan diameter [m]
+    fan_coverage:    float = 0.0     # fan sweep area / face area [-]
+    warnings:        list[str] = field(default_factory=list)
 
 
 @dataclass
 class BundleRatingResult:
-    geom:         BundleGeometry
-    htc:          HTCBreakdown
-    Q_kW:         float
-    T_proc_in:    float
-    T_proc_out:   float
-    T_air_in:     float
-    T_air_out:    float
-    m_proc_kgs:   float
-    m_air_kgs:    float
-    G_air:        float
-    v_tube_ms:    float
-    Re_tube:      float
-    A_total_m2:   float
-    epsilon:      float
-    dP_air_Pa:    float
-    P_fan_kW:     float
-    warnings:     list[str] = field(default_factory=list)
+    geom:            BundleGeometry
+    htc:             HTCBreakdown
+    Q_kW:            float
+    T_proc_in:       float
+    T_proc_out:      float
+    T_air_in:        float
+    T_air_out:       float
+    m_proc_kgs:      float
+    m_air_kgs:       float
+    G_air:           float
+    v_tube_ms:       float
+    Re_tube:         float
+    A_total_m2:      float
+    epsilon:         float
+    dP_air_Pa:       float
+    P_fan_kW:        float
+    fan_diam_m:      float = 0.0
+    fan_coverage:    float = 0.0
+    warnings:        list[str] = field(default_factory=list)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _tpr(fg: FinGeometry) -> int:
-    """Tubes per row per bay (standard 2438 mm bay)."""
-    return max(4, round(_BAY_WIDTH_M / fg.pitch_m))
+def _tpr(fg: FinGeometry, bay_width_m: float = _BAY_WIDTH_DEFAULT) -> int:
+    """Tubes per row per bay for the given bay width."""
+    return max(4, round(bay_width_m / fg.pitch_m))
 
 
 def _free_flow_area(fg: FinGeometry, n_tubes_all: int, L: float) -> float:
     """Total minimum free-flow area for air [m²]."""
     return max(fg.pitch_m - fg.do_fin_m, 1e-4) * n_tubes_all * L
+
+
+def _fan_geometry(n_bays: int, n_fans_bay: int,
+                  bay_width_m: float, L_tube_m: float,
+                  target_coverage: float = 0.90) -> tuple[float, float]:
+    """
+    Return (fan_diam_m, coverage_ratio) sized to achieve *target_coverage*.
+    Fan diameter is rounded down to the nearest standard size.
+    Standard fan diameters (API 661 practice): 2.44, 2.74, 3.05, 3.35, 3.66, 4.27 m
+    """
+    _STD_FAN_D = [2.438, 2.743, 3.048, 3.353, 3.658, 4.267]  # m
+
+    face_area = n_bays * bay_width_m * L_tube_m
+    n_fans    = n_bays * n_fans_bay
+    # Required fan diameter for target coverage
+    d_req = math.sqrt(4.0 * face_area * target_coverage / (n_fans * math.pi))
+    # Pick the largest standard size that doesn't exceed the required
+    d_fan = _STD_FAN_D[0]
+    for d in _STD_FAN_D:
+        if d <= d_req:
+            d_fan = d
+    coverage = n_fans * math.pi * (d_fan / 2)**2 / max(face_area, 1e-6)
+    return d_fan, coverage
 
 
 def _air_dp(G: float, air: AirProps, fg: FinGeometry, n_rows: int) -> float:
@@ -146,13 +187,14 @@ def design_bundle(
     fluid_proc:   FluidProps,
     fin_type_key: str,
     n_rows:       int   = 6,
-    L_tube_m:     float = 9.144,   # 30 ft
+    L_tube_m:     float = 9.144,
     n_passes:     int   = 2,
     fan_type:     str   = "Forced draft",
     altitude_m:   float = 0.0,
-    Rf_air:       float = 1.85e-5,    # on total external area [m²K/W]
-    Rf_tube:      float = 1.76e-4, # on inner area [m²K/W]
+    Rf_air:       float = 1.85e-5,
+    Rf_tube:      float = 1.76e-4,
     k_wall:       float = 50.0,
+    bay_width_m:  float = _BAY_WIDTH_DEFAULT,
 ) -> BundleDesignResult:
     """
     Design an ACHE bundle.
@@ -175,7 +217,7 @@ def design_bundle(
     LMTD_eff = max(F * LMTD_cf, 0.5)
 
     air       = air_properties(0.5 * (T_air_in + T_air_out), altitude_m)
-    tpr_val   = _tpr(fg)
+    tpr_val   = _tpr(fg, bay_width_m)
     A_per_bay = tpr_val * n_rows * fg.A_total_pm * L_tube_m
     A_ff_bay  = _free_flow_area(fg, tpr_val, L_tube_m)
 
@@ -248,11 +290,26 @@ def design_bundle(
     eta_o    = overall_surface_efficiency(eta_f, fg)
 
     if G_air < 2.0:
-        warnings.append(f"Air mass flux G = {G_air:.1f} kg/(m²·s) — low; check fan sizing.")
-    if G_air > 10.0:
-        warnings.append(f"Air mass flux G = {G_air:.1f} kg/(m²·s) — high; check ΔP.")
+        warnings.append(f"G_air = {G_air:.1f} kg/(m²·s) — low; check fan sizing.")
+    if G_air > _G_AIR_MAX_WARN:
+        warnings.append(
+            f"G_air = {G_air:.1f} kg/(m²·s) > {_G_AIR_MAX_WARN} — "
+            f"elevated noise/vibration risk; consider more bays."
+        )
     if v_tube < 0.3:
         warnings.append(f"Tube velocity {v_tube:.2f} m/s — risk of fouling/settling.")
+    if n_rows > 6:
+        warnings.append(
+            f"{n_rows} rows: performance of rows 7+ is diminished (rising air temp). "
+            f"6 rows is the typical optimum; >8 rows is rarely justified."
+        )
+
+    fan_d, fan_cov = _fan_geometry(n_bays, 2, bay_width_m, L_tube_m)
+    if fan_cov < _FAN_COV_MIN:
+        warnings.append(
+            f"Fan coverage {fan_cov*100:.0f}% < API 661 minimum 40%. "
+            f"Use larger fans (recommended ≥ {fan_d:.2f} m diameter)."
+        )
 
     htc = HTCBreakdown(
         h_air_bare = h_bare, eta_fin = eta_f, eta_o = eta_o,
@@ -271,28 +328,31 @@ def design_bundle(
         L_tube_m    = L_tube_m,
         n_passes    = n_passes_eff,
         fan_type    = fan_type,
+        bay_width_m = bay_width_m,
     )
 
     return BundleDesignResult(
-        geom        = geom,
-        htc         = htc,
-        Q_kW        = Q_kW,
-        T_proc_in   = T_proc_in,
-        T_proc_out  = T_proc_out,
-        T_air_in    = T_air_in,
-        T_air_out   = T_air_out,
-        m_proc_kgs  = m_proc,
-        m_air_kgs   = m_air,
-        G_air       = G_air,
-        v_tube_ms   = v_tube,
-        Re_tube     = Re_tube,
-        A_total_m2  = A_total,
-        A_req_m2    = A_req,
-        area_margin = A_total / max(A_req, 1.0) - 1.0,
-        dP_air_Pa   = dP_air,
-        P_fan_kW    = P_fan,
+        geom         = geom,
+        htc          = htc,
+        Q_kW         = Q_kW,
+        T_proc_in    = T_proc_in,
+        T_proc_out   = T_proc_out,
+        T_air_in     = T_air_in,
+        T_air_out    = T_air_out,
+        m_proc_kgs   = m_proc,
+        m_air_kgs    = m_air,
+        G_air        = G_air,
+        v_tube_ms    = v_tube,
+        Re_tube      = Re_tube,
+        A_total_m2   = A_total,
+        A_req_m2     = A_req,
+        area_margin  = A_total / max(A_req, 1.0) - 1.0,
+        dP_air_Pa    = dP_air,
+        P_fan_kW     = P_fan,
         n_passes_eff = n_passes_eff,
-        warnings    = warnings,
+        fan_diam_m   = fan_d,
+        fan_coverage = fan_cov,
+        warnings     = warnings,
     )
 
 
@@ -352,8 +412,15 @@ def rate_bundle(
 
     if v < 0.3:
         warnings.append(f"Tube velocity {v:.2f} m/s — low flow, may be laminar.")
+    if G_air > _G_AIR_MAX_WARN:
+        warnings.append(f"G_air = {G_air:.1f} kg/(m²·s) > {_G_AIR_MAX_WARN} — high; check ΔP/noise.")
     if T_proc_out > T_proc_in + 0.5:
         warnings.append("Process outlet T > inlet — check temperature inputs.")
+
+    fan_d, fan_cov = _fan_geometry(geom.n_bays, geom.n_fans_bay,
+                                    geom.bay_width_m, geom.L_tube_m)
+    if fan_cov < _FAN_COV_MIN:
+        warnings.append(f"Fan coverage {fan_cov*100:.0f}% < API 661 minimum 40%.")
 
     return BundleRatingResult(
         geom       = geom,
@@ -372,6 +439,8 @@ def rate_bundle(
         epsilon    = eps,
         dP_air_Pa  = dP,
         P_fan_kW   = Pf,
+        fan_diam_m  = fan_d,
+        fan_coverage = fan_cov,
         warnings   = warnings,
     )
 
@@ -413,6 +482,7 @@ def goal_seek_design(
     Rf_air:       float  = 1.85e-5,
     Rf_tube:      float  = 1.76e-4,
     k_wall:       float  = 50.0,
+    bay_width_m:  float  = _BAY_WIDTH_DEFAULT,
 ) -> list[GoalSeekRow]:
     """
     Sweep (n_rows, n_passes) combinations and return every feasible design,
@@ -445,6 +515,7 @@ def goal_seek_design(
                     n_rows=nr, L_tube_m=L_tube_m, n_passes=np,
                     fan_type=fan_type, altitude_m=altitude_m,
                     Rf_air=Rf_air, Rf_tube=Rf_tube, k_wall=k_wall,
+                    bay_width_m=bay_width_m,
                 )
             except Exception:
                 continue

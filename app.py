@@ -118,8 +118,25 @@ with st.sidebar:
     st.subheader("Bundle geometry")
     fin_key  = st.selectbox("Fin type", FIN_TYPE_KEYS,
                              format_func=lambda k: FIN_TYPE_LABELS[k], key="fin_key")
-    fan_type = st.radio("Fan arrangement", ["Forced draft", "Induced draft"],
-                         horizontal=True, key="fan_type")
+
+    # V-type note: same B-Y correlations; not suited where recirculation is a problem
+    _FAN_TYPES = ["Forced draft", "Induced draft", "V-type / A-frame (forced draft)"]
+    fan_type = st.selectbox("Fan arrangement", _FAN_TYPES, key="fan_type")
+    if "V-type" in fan_type:
+        st.caption(
+            "V-type uses identical Briggs-Young correlations. "
+            "Not recommended where hot-air recirculation is a concern (KLM / literature consensus)."
+        )
+
+    # Bay width — standard options per API 661 / common practice
+    _BAY_WIDTHS = {
+        "2.438 m  (8 ft) — standard": 2.438,
+        "3.048 m (10 ft)":             3.048,
+        "3.658 m (12 ft) — wide":      3.658,
+    }
+    bay_w_sel  = st.selectbox("Bay width", list(_BAY_WIDTHS.keys()),
+                               key="bay_w_sel")
+    bay_width_m = _BAY_WIDTHS[bay_w_sel]
 
     c1, c2 = st.columns(2)
     n_rows   = c1.number_input("Rows",   value=6, min_value=1, max_value=12, step=1, key="n_rows")
@@ -223,6 +240,7 @@ if mode == "Design" and run_gs:
             fan_type=fan_type,
             altitude_m=altitude_m,
             Rf_air=Rf_air, Rf_tube=Rf_tube, k_wall=k_wall,
+            bay_width_m=bay_width_m,
         )
         st.session_state["gs_rows"] = gs_rows
     except Exception as exc:
@@ -249,6 +267,7 @@ try:
                 n_rows=n_rows, L_tube_m=L_tube_m, n_passes=n_passes,
                 fan_type=fan_type, altitude_m=altitude_m,
                 Rf_air=Rf_air, Rf_tube=Rf_tube, k_wall=k_wall,
+                bay_width_m=bay_width_m,
             )
     else:
         geom = BundleGeometry(
@@ -367,46 +386,70 @@ if result is not None:
     T_proc_out_r  = result.T_proc_out
     T_air_out_r   = result.T_air_out if hasattr(result, "T_air_out") else None
 
-    # KLM: product outlet T ≥ air inlet + 10°C
+    # Minimum approach temperature
+    # KLM conservative: ≥ 10°C; literature practical minimum: 5.6°C (10°F)
     approach = T_proc_out_r - T_air_in_used
-    if approach < 10.0:
+    if approach < 5.6:
         spec_warns.append(
-            f"Minimum approach temperature violated: T_proc_out ({T_proc_out_r:.1f}°C) is only "
-            f"{approach:.1f} K above T_air_in ({T_air_in_used:.1f}°C). "
-            f"KLM spec requires ≥ 10 K."
+            f"Approach temperature {approach:.1f} K is below the practical industry minimum "
+            f"of 5.6°C (10°F). Feasible but extremely expensive; review design."
+        )
+    elif approach < 10.0:
+        spec_infos.append(
+            f"Approach {approach:.1f} K is below KLM conservative minimum (10°C), "
+            f"but above the industry practical minimum (5.6°C / 10°F). Verify economics."
         )
 
-    # KLM: air outlet T ≤ 60°C with fans running
+    # Air outlet T ≤ 60°C with fans running (KLM / all sources)
     if T_air_out_r is not None and T_air_out_r > 60.0:
         spec_warns.append(
-            f"Air outlet temperature {T_air_out_r:.1f}°C exceeds KLM limit of 60°C "
-            f"(fans operating). Risk of damage to fan bearings and blade adjustment mechanism."
+            f"Air outlet {T_air_out_r:.1f}°C exceeds 60°C limit (fans operating) — "
+            f"risk of damage to fan bearings and blade mechanism (KLM / API 661)."
         )
 
-    # KLM: forced draft required if T_proc_out - T_air_in ≥ 15°C
+    # Forced draft required when approach ≥ 15°C (KLM)
     if approach >= 15.0 and "Induced" in result.geom.fan_type:
         spec_warns.append(
             f"KLM requires forced draft when T_proc_out − T_air_in ≥ 15°C "
-            f"(currently {approach:.1f} K). Switch to forced draft."
+            f"(here {approach:.1f} K). Switch to forced draft."
         )
 
-    # KLM: max 8 tube rows
+    # V-type: warn if recirculation correction is non-zero or high G
+    if "V-type" in result.geom.fan_type and recirc_dT > 0.0:
+        spec_warns.append(
+            "V-type / A-frame should NOT be used where hot-air recirculation is a concern "
+            "(all literature sources agree). Consider flat forced-draft layout."
+        )
+
+    # Row count advisory (literature: >6 rows diminishing returns; KLM >8 rows limit)
     if result.geom.n_rows > 8:
         spec_warns.append(
-            f"KLM spec: maximum 8 rows. Current design uses {result.geom.n_rows} rows — "
-            f"may exceed shipping/structural limits."
+            f"{result.geom.n_rows} rows exceeds KLM maximum of 8 — "
+            "may exceed shipping and structural limits."
+        )
+    elif result.geom.n_rows > 6:
+        spec_infos.append(
+            f"{result.geom.n_rows} rows: rows beyond 6 give diminishing returns "
+            "due to rising air temperature (literature consensus). Consider 6 rows max."
         )
 
-    # Advisory: fan 10% reserve (KLM item 11)
+    # API 661 fan coverage (already in engine warnings if <40%, add advisory for 40-60%)
+    if 0.40 <= result.fan_coverage < 0.60:
+        spec_infos.append(
+            f"Fan coverage {result.fan_coverage*100:.0f}% meets API 661 minimum (40%) but is low. "
+            f"Typical designs aim for ≥ 75%."
+        )
+
+    # Fan 10% reserve advisory (KLM)
     spec_infos.append(
-        "Fan sizing note (KLM §Air-Side item 11): specify variable-pitch fans "
-        "capable of providing +10% airflow at constant speed."
+        "Fan sizing (KLM §Air-Side item 11): specify variable-pitch fans "
+        "capable of +10% airflow at constant speed."
     )
 
     if recirc_dT == 0.0:
         spec_infos.append(
-            "Recirculation: if unit is within 30 m of large buildings or obstructions, "
-            "add 1–2°C to air inlet temperature (KLM §Design Considerations item 2)."
+            "Recirculation: if within 30 m of large buildings, add 1–2°C to air inlet T "
+            "(KLM §Design Considerations). Near engine exhausts: up to +8°C."
         )
 
     for w in spec_warns:
@@ -434,7 +477,7 @@ if "gs_rows" in st.session_state and mode == "Design":
             df_data = []
             for r in gs_rows:
                 flags = []
-                if r.G_air > 9.0:   flags.append("⚠ G high")
+                if r.G_air > 12.0:  flags.append("⚠ G high")
                 if r.G_air < 2.5:   flags.append("⚠ G low")
                 if r.v_tube_ms < 0.3: flags.append("⚠ v low")
                 df_data.append({
@@ -498,20 +541,17 @@ def _draw_bundle(res: BundleDesignResult | BundleRatingResult) -> go.Figure:
     fg        = fin_geometry(res.geom.fin_type)
     nb        = res.geom.n_bays
     nr        = res.geom.n_rows
-    Lt        = res.geom.L_tube_m          # tube length = unit length [m]
-    bay_w     = 2.438                       # standard 8-ft bay width [m]
-    total_w   = nb * bay_w                  # total bay width [m]
-    bundle_d  = nr * fg.pitch_m             # bundle depth (air flow dir) [m]
-    hdr_h     = 0.25                        # header box height [m]
-    forced    = "forced" in res.geom.fan_type.lower()
+    Lt        = res.geom.L_tube_m
+    bay_w     = res.geom.bay_width_m        # configurable bay width
+    total_w   = nb * bay_w
+    bundle_d  = nr * fg.pitch_m
+    hdr_h     = 0.25
+    is_vtype  = "V-type" in res.geom.fan_type
+    forced    = "forced" in res.geom.fan_type.lower() or is_vtype
 
-    # Fan geometry (2 fans per bay, along tube length)
+    # Use the fan diameter computed in the engine (stored in result)
+    fan_d     = getattr(res, "fan_diam_m", None) or 3.658
     n_fans_bay = 2
-    n_fans     = nb * n_fans_bay
-    # Fan diameter ≈ 0.90 × (face area per fan)^0.5
-    face_area_per_fan = (Lt * bay_w) / n_fans_bay   # m² per fan for one bay
-    fan_d = min(0.90 * math.sqrt(face_area_per_fan * 4 / math.pi), Lt / n_fans_bay * 0.90)
-    fan_d = round(fan_d / 0.3048) * 0.3048          # snap to nearest foot
 
     # Vertical layout (forced draft: fans below bundle)
     struct_h  = 0.50     # structural steel / fan pedestal above grade
@@ -527,13 +567,15 @@ def _draw_bundle(res: BundleDesignResult | BundleRatingResult) -> go.Figure:
     bundle_top = bundle_bot + hdr_h + bundle_d + hdr_h
     H_total    = bundle_top + (0.40 + plenum_h if not forced else 0.20)
 
+    left_title = (
+        "A-frame elevation (front view, 1 bay)"
+        if is_vtype else
+        f"Side elevation  (1 bay shown of {nb})"
+    )
     fig = make_subplots(
         rows=1, cols=2,
         column_widths=[0.70, 0.30],
-        subplot_titles=[
-            f"Side elevation  (1 bay shown of {nb})",
-            f"Plan view — footprint",
-        ],
+        subplot_titles=[left_title, "Plan view — footprint"],
         horizontal_spacing=0.06,
     )
 
@@ -547,87 +589,133 @@ def _draw_bundle(res: BundleDesignResult | BundleRatingResult) -> go.Figure:
                            xref=f"x{'' if col==1 else col}",
                            yref=f"y{'' if col==1 else col}", **kw)
 
-    # ── LEFT: side elevation ──────────────────────────────────────────────────
-    # Bottom header box
-    sh(dict(type="rect", x0=0, x1=Lt,
-            y0=bundle_bot, y1=bundle_bot + hdr_h,
-            fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5))
+    # ── LEFT panel ────────────────────────────────────────────────────────────
+    if is_vtype:
+        # ── V-type / A-frame: front elevation (looking along tube axis) ───────
+        # Two bundles angled at 60° from horizontal, meeting at ridge.
+        # Width shown = bundle length (Lt), height = A-frame profile.
+        import math as _m
+        angle_deg = 60.0
+        angle_rad = _m.radians(angle_deg)
+        # Half-span at base: bundle length / 2 (each leg)
+        half_span = Lt / 2.0 * _m.cos(angle_rad)
+        apex_h    = Lt / 2.0 * _m.sin(angle_rad)
+        fan_cy    = 0.3        # fan centre height above grade
+        cx        = Lt / 2.0   # centre of A-frame
 
-    # Tube bundle (light fill)
-    sh(dict(type="rect", x0=0, x1=Lt,
-            y0=bundle_bot + hdr_h, y1=bundle_bot + hdr_h + bundle_d,
-            fillcolor="#f0f5fa", line_color="#b0b8c4", line_width=1))
-
-    # Tube rows as horizontal dashed lines
-    for i in range(nr):
-        ry = bundle_bot + hdr_h + (i + 0.5) * fg.pitch_m
-        sh(dict(type="line", x0=0, x1=Lt, y0=ry, y1=ry,
-                line=dict(color="#aab4c8", width=1, dash="dot")))
-
-    # Top header box
-    sh(dict(type="rect", x0=0, x1=Lt,
-            y0=bundle_bot + hdr_h + bundle_d,
-            y1=bundle_bot + hdr_h + bundle_d + hdr_h,
-            fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5))
-
-    # Fans along tube length
-    for i in range(n_fans_bay):       # show 1 bay worth of fans
-        cx   = Lt / n_fans_bay * (i + 0.5)
-        if forced:
-            cy = struct_h + 0.20
-            fy0, fy1 = cy - fan_d / 2, cy + fan_d / 2
-        else:
-            cy   = bundle_top + plenum_h / 2 + 0.20
-            fy0  = bundle_top + 0.1
-            fy1  = bundle_top + 0.4 + plenum_h
-        sh(dict(type="circle", x0=cx - fan_d/2, y0=fy0,
-                x1=cx + fan_d/2, y1=fy1,
+        # Left bundle (from bottom-left to apex)
+        sh(dict(type="path",
+                path=f"M 0,{fan_cy + fan_d*0.15} L {cx-0.05},{fan_cy + apex_h} L {cx+0.05},{fan_cy + apex_h} L {half_span},{fan_cy + fan_d*0.15} Z",
+                fillcolor="#f0f5fa", line_color="#b0b8c4", line_width=1))
+        # Bundle fills
+        for i in range(2):
+            # Left leg row lines
+            frac = (i + 0.5) / nr * (nr / 2)
+            for leg, sign in [(-1, 1), (1, -1)]:
+                xleg = cx + sign * (i + 0.5) * fg.pitch_m * _m.cos(angle_rad) / nr * nr
+                yleg = fan_cy + apex_h - (i + 0.5) * fg.pitch_m * _m.sin(angle_rad) / nr * nr
+        # Header boxes at ridge (top)
+        sh(dict(type="rect", x0=cx - 0.15, x1=cx + 0.15,
+                y0=fan_cy + apex_h - 0.05, y1=fan_cy + apex_h + hdr_h,
+                fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5))
+        # Fan circle at base
+        sh(dict(type="circle", x0=cx - fan_d/2, y0=0, x1=cx + fan_d/2, y1=fan_d,
                 fillcolor="#dce4ef", line_color="#2d5f8a", line_width=2))
-        ann(cx, (fy0 + fy1) / 2, "⊕ FAN", col=1,
-            font=dict(size=9, color="#2d5f8a"))
+        ann(cx, fan_d / 2, "⊕ FAN", col=1, font=dict(size=9, color="#2d5f8a"))
+        # Hot-in / cool-out at bundle feet
+        ann(0, fan_cy + fan_d * 0.15,
+            f"← {res.T_proc_out:.0f}°C  out", col=1,
+            font=dict(size=9, color="#3a6fa8"), align="right")
+        ann(Lt, fan_cy + fan_d * 0.15,
+            f"{res.T_proc_in:.0f}°C in →", col=1,
+            font=dict(size=9, color="#b52b2b"), align="left")
+        # Air arrows upward on both sides
+        for ax_x in [Lt * 0.25, Lt * 0.75]:
+            fig.add_annotation(
+                x=ax_x, y=fan_cy + apex_h * 0.5,
+                ax=ax_x, ay=0.1,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.2,
+                arrowcolor="#4488aa", arrowwidth=2, text="",
+            )
+        ann(cx, -0.35, f"A-frame — L={Lt:.2f} m  bay_w={bay_w:.2f} m", col=1,
+            font=dict(size=9, color="#555"))
+        H_total = fan_cy + apex_h + hdr_h + 0.5
 
-    # Air flow arrows
-    arrow_y_mid = (bundle_bot / 2) if forced else (air_arrow_y0 + air_arrow_y1) / 2
-    for ax_x in [Lt * 0.30, Lt * 0.70]:
+    else:
+        # ── Flat bundle: side elevation ───────────────────────────────────────
+        # Bottom header box
+        sh(dict(type="rect", x0=0, x1=Lt,
+                y0=bundle_bot, y1=bundle_bot + hdr_h,
+                fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5))
+
+        # Tube bundle (light fill)
+        sh(dict(type="rect", x0=0, x1=Lt,
+                y0=bundle_bot + hdr_h, y1=bundle_bot + hdr_h + bundle_d,
+                fillcolor="#f0f5fa", line_color="#b0b8c4", line_width=1))
+
+        # Tube rows as horizontal dashed lines
+        for i in range(nr):
+            ry = bundle_bot + hdr_h + (i + 0.5) * fg.pitch_m
+            sh(dict(type="line", x0=0, x1=Lt, y0=ry, y1=ry,
+                    line=dict(color="#aab4c8", width=1, dash="dot")))
+
+        # Top header box
+        sh(dict(type="rect", x0=0, x1=Lt,
+                y0=bundle_bot + hdr_h + bundle_d,
+                y1=bundle_bot + hdr_h + bundle_d + hdr_h,
+                fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5))
+
+        # Fans along tube length
+        for i in range(n_fans_bay):
+            cx   = Lt / n_fans_bay * (i + 0.5)
+            if forced:
+                cy = struct_h + 0.20
+                fy0, fy1 = cy - fan_d / 2, cy + fan_d / 2
+            else:
+                cy   = bundle_top + plenum_h / 2 + 0.20
+                fy0  = bundle_top + 0.1
+                fy1  = bundle_top + 0.4 + plenum_h
+            sh(dict(type="circle", x0=cx - fan_d/2, y0=fy0,
+                    x1=cx + fan_d/2, y1=fy1,
+                    fillcolor="#dce4ef", line_color="#2d5f8a", line_width=2))
+            ann(cx, (fy0 + fy1) / 2, "⊕ FAN", col=1,
+                font=dict(size=9, color="#2d5f8a"))
+
+    if not is_vtype:
+        # Air flow arrows (flat bundles only; V-type arrows drawn above)
+        for ax_x in [Lt * 0.30, Lt * 0.70]:
+            fig.add_annotation(
+                x=ax_x, y=bundle_bot + hdr_h * 0.5 if forced else bundle_top + hdr_h,
+                ax=ax_x, ay=0.0 if forced else H_total - 0.1,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.2,
+                arrowcolor="#4488aa", arrowwidth=2, text="",
+            )
+        ann(Lt * 0.5, 0.05, "↑ Air in" if forced else "↑ Air out",
+            col=1, font=dict(size=9, color="#4488aa"))
+
+        ann(-0.4, bundle_bot + hdr_h * 0.5,
+            f"Hot in\n{res.T_proc_in:.0f}°C", col=1,
+            font=dict(size=9, color="#b52b2b"), align="right")
+        ann(Lt + 0.4, bundle_bot + hdr_h * 0.5,
+            f"Cool out\n{res.T_proc_out:.0f}°C", col=1,
+            font=dict(size=9, color="#3a6fa8"), align="left")
+
+        # Dimension annotations
         fig.add_annotation(
-            x=ax_x, y=bundle_bot + hdr_h * 0.5 if forced else bundle_top + hdr_h,
-            ax=ax_x, ay=0.0 if forced else H_total - 0.1,
+            x=Lt, y=-0.15, ax=0, ay=-0.15,
             xref="x", yref="y", axref="x", ayref="y",
-            showarrow=True, arrowhead=2, arrowsize=1.2,
-            arrowcolor="#4488aa" if forced else "#4488aa",
-            arrowwidth=2,
-            text="",
+            showarrow=True, arrowhead=2, arrowcolor="#555", arrowwidth=1.5, text="",
         )
-
-    ann(Lt * 0.5, 0.05, "↑ Air in" if forced else "↑ Air out",
-        col=1, font=dict(size=9, color="#4488aa"))
-
-    # Process fluid labels on header boxes
-    ann(-0.4, bundle_bot + hdr_h * 0.5,
-        f"Hot in\n{res.T_proc_in:.0f}°C", col=1,
-        font=dict(size=9, color="#b52b2b"), align="right")
-    ann(Lt + 0.4, bundle_bot + hdr_h * 0.5,
-        f"Cool out\n{res.T_proc_out:.0f}°C", col=1,
-        font=dict(size=9, color="#3a6fa8"), align="left")
-
-    # Dimension annotations
-    # — tube length (horizontal arrow)
-    fig.add_annotation(
-        x=Lt, y=-0.15, ax=0, ay=-0.15,
-        xref="x", yref="y", axref="x", ayref="y",
-        showarrow=True, arrowhead=2, arrowcolor="#555", arrowwidth=1.5, text="",
-    )
-    fig.add_annotation(
-        x=0, y=-0.15, ax=Lt, ay=-0.15,
-        xref="x", yref="y", axref="x", ayref="y",
-        showarrow=True, arrowhead=2, arrowcolor="#555", arrowwidth=1.5, text="",
-    )
-    ann(Lt / 2, -0.32, f"L = {Lt:.2f} m", col=1,
-        font=dict(size=9, color="#555"))
-
-    # — unit height (vertical annotation)
-    ann(Lt + 0.6, bundle_top / 2, f"H ≈ {bundle_top:.1f} m", col=1,
-        font=dict(size=9, color="#555"))
+        fig.add_annotation(
+            x=0, y=-0.15, ax=Lt, ay=-0.15,
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True, arrowhead=2, arrowcolor="#555", arrowwidth=1.5, text="",
+        )
+        ann(Lt / 2, -0.32, f"L = {Lt:.2f} m", col=1, font=dict(size=9, color="#555"))
+        ann(Lt + 0.6, bundle_top / 2, f"H ≈ {bundle_top:.1f} m", col=1,
+            font=dict(size=9, color="#555"))
 
     # ── RIGHT: plan view (footprint) ──────────────────────────────────────────
     for ib in range(nb):
@@ -734,6 +822,17 @@ if result is not None:
         c2.metric("Fan power", f"{result.P_fan_kW:.1f} kW")
         c3.metric("Process v_tube", f"{result.v_tube_ms:.2f} m/s")
         c4.metric("Re tube-side", f"{result.Re_tube:.0f}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        fan_cov_pct = result.fan_coverage * 100
+        c1.metric("Fan diameter",
+                  f"{result.fan_diam_m:.2f} m  ({result.fan_diam_m/0.3048:.0f} ft)")
+        c2.metric("Fan coverage",
+                  f"{fan_cov_pct:.0f}%",
+                  delta=f"{fan_cov_pct - 40:.0f}% vs API 661 min",
+                  delta_color="normal" if fan_cov_pct >= 40 else "inverse")
+        c3.metric("Bay width", f"{result.geom.bay_width_m:.3f} m")
+        c4.metric("Face area", f"{result.geom.face_area_m2:.1f} m²")
 
     with st.expander("**Process stream**", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
