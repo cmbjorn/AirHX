@@ -96,7 +96,7 @@ def overall_U(
     h_tube:      float,   # tube-side HTC on inner area [W/(m²·K)]
     fg:          FinGeometry,
     k_wall:      float = 50.0,    # tube wall conductivity [W/(m·K)] — CS
-    Rf_air:      float = 9e-6,    # air-side fouling on total external area [m²K/W]
+    Rf_air:      float = 1.85e-5, # air-side fouling on total external area [m²K/W]
     Rf_tube:     float = 1.76e-4, # tube-side fouling on inner area [m²K/W]
 ) -> float:
     """
@@ -108,8 +108,11 @@ def overall_U(
       - Tube side:  Rf_tube and 1/h_tube are on inner area
                     → multiply by A_r (= A_total/A_inner) to refer to total area
 
-    Rf_air default 9e-6 corresponds to API 661 0.00018 m²K/W on bare tube
-    divided by the typical A_total/A_bare ratio of ~20.
+    Rf_air default: KLM spec 0.002 h·ft²·°F/Btu = 3.52×10⁻⁴ m²K/W on bare tube
+    outer area → divided by typical A_total/A_bare ≈ 19 → 1.85×10⁻⁵ m²K/W on total area.
+    API 661 uses 0.0002 h·ft²·°F/Btu (10× lower, cleaner service).
+
+    Rf_tube default: 0.001 h·ft²·°F/Btu = 1.76×10⁻⁴ m²K/W on inner area (TEMA fouled).
     """
     Ar = fg.A_r   # A_total / A_inner
 

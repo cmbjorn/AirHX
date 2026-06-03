@@ -150,7 +150,7 @@ def design_bundle(
     n_passes:     int   = 2,
     fan_type:     str   = "Forced draft",
     altitude_m:   float = 0.0,
-    Rf_air:       float = 9e-6,    # on total external area [m²K/W]
+    Rf_air:       float = 1.85e-5,    # on total external area [m²K/W]
     Rf_tube:      float = 1.76e-4, # on inner area [m²K/W]
     k_wall:       float = 50.0,
 ) -> BundleDesignResult:
@@ -306,7 +306,7 @@ def rate_bundle(
     T_air_in:    float,
     m_air_kgs:   float,
     altitude_m:  float = 0.0,
-    Rf_air:      float = 9e-6,
+    Rf_air:      float = 1.85e-5,
     Rf_tube:     float = 1.76e-4,
     k_wall:      float = 50.0,
 ) -> BundleRatingResult:
@@ -410,7 +410,7 @@ def goal_seek_design(
     L_tube_m:     float  = 9.144,
     fan_type:     str    = "Forced draft",
     altitude_m:   float  = 0.0,
-    Rf_air:       float  = 9e-6,
+    Rf_air:       float  = 1.85e-5,
     Rf_tube:      float  = 1.76e-4,
     k_wall:       float  = 50.0,
 ) -> list[GoalSeekRow]:

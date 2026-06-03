@@ -122,18 +122,52 @@ with st.sidebar:
                          horizontal=True, key="fan_type")
 
     c1, c2 = st.columns(2)
-    n_rows   = c1.number_input("Rows",       value=6, min_value=1, max_value=12, step=1, key="n_rows")
-    n_passes = c2.number_input("Passes",     value=2, min_value=1, max_value=12, step=1, key="n_passes")
-    L_tube_m = st.number_input("Tube length [m]", value=9.144, min_value=3.0, step=0.305, key="L_tube_m")
+    n_rows   = c1.number_input("Rows",   value=6, min_value=1, max_value=12, step=1, key="n_rows")
+    n_passes = c2.number_input("Passes", value=2, min_value=1, max_value=12, step=1, key="n_passes")
+
+    # Standard tube lengths per KLM spec + API 661 common practice
+    _STD_LENGTHS = {
+        "2.44 m  (8 ft)":  2.438,
+        "3.05 m (10 ft)":  3.048,
+        "4.57 m (15 ft)":  4.572,
+        "6.07 m (20 ft)":  6.096,
+        "7.31 m (24 ft)":  7.315,
+        "9.14 m (30 ft)":  9.144,
+        "10.36 m (34 ft)": 10.363,
+        "12.19 m (40 ft)": 12.192,
+    }
+    _default_len = "9.14 m (30 ft)"
+    L_sel    = st.selectbox("Tube length", list(_STD_LENGTHS.keys()),
+                             index=list(_STD_LENGTHS.keys()).index(_default_len),
+                             key="L_tube_sel")
+    L_tube_m = _STD_LENGTHS[L_sel]
 
     if mode == "Rating":
         n_bays_r  = st.number_input("Number of bays", value=1, min_value=1, max_value=20, step=1, key="n_bays_r")
         n_tubes_r = st.number_input("Tubes per row (per bay)", value=38, min_value=4, step=1, key="n_tubes_r")
 
+    # Recirculation correction (KLM: +1–2°C near buildings, +8°C near engines)
+    with st.expander("Hot-air recirculation correction"):
+        recirc_dT = st.number_input(
+            "Add to air inlet T [°C]",
+            value=0.0, min_value=0.0, max_value=15.0, step=0.5,
+            help="KLM spec: add 1–2°C for locations near large buildings; "
+                 "up to 8°C near engine exhausts. Added to T_air_in before calculation.",
+            key="recirc_dT",
+        )
+
     with st.expander("Fouling & wall"):
-        Rf_air  = st.number_input("Air-side fouling [×10⁻⁶ m²K/W]",  value=9.0, step=1.0) * 1e-6
-        Rf_tube = st.number_input("Tube-side fouling [×10⁻⁴ m²K/W]", value=1.76, step=0.1) * 1e-4
-        k_wall  = st.number_input("Wall conductivity [W/m·K]", value=50.0, step=5.0)
+        st.caption("Rf_air on total external (finned) area; Rf_tube on inner area.")
+        # KLM spec: air-side 0.002 h·ft²·°F/Btu = 3.52e-4 m²K/W on bare tube ÷ ~19 = 1.85e-5 on total area
+        # API 661:  air-side 0.0002 h·ft²·°F/Btu → 1.85e-6 on total area  (cleaner service)
+        Rf_air_x  = st.number_input("Air-side Rf [×10⁻⁵ m²K/W, total area]",
+                                     value=1.85, step=0.1,
+                                     help="KLM 1.85; API 661 clean 0.19; dirty 3.5")
+        Rf_air    = Rf_air_x * 1e-5
+        Rf_tube   = st.number_input("Tube-side Rf [×10⁻⁴ m²K/W, inner area]",
+                                     value=1.76, step=0.1,
+                                     help="TEMA: 1.76 = 0.001 h·ft²·°F/Btu") * 1e-4
+        k_wall    = st.number_input("Wall conductivity [W/m·K]", value=50.0, step=5.0)
 
     if mode == "Design":
         run_gs = st.button("🔍 Goal Seek", use_container_width=True,
@@ -172,6 +206,9 @@ with st.sidebar:
 T_proc_mean = 0.5 * (T_proc_in + T_proc_out)
 fluid = fluid_properties(fluid_name, T_proc_mean, custom_fluid)
 
+# Apply recirculation correction to air inlet temperature
+T_air_in_eff = T_air_in + recirc_dT
+
 # Goal-seek: run sweep when button pressed, cache in session_state
 if mode == "Design" and run_gs:
     T_air_out_gs = st.session_state.get("T_air_out_d", 55.0)
@@ -179,7 +216,7 @@ if mode == "Design" and run_gs:
         gs_rows = goal_seek_design(
             Q_kW=Q_kW,
             T_proc_in=T_proc_in, T_proc_out=T_proc_out,
-            T_air_in=T_air_in,   T_air_out=T_air_out_gs,
+            T_air_in=T_air_in_eff, T_air_out=T_air_out_gs,
             fluid_proc=fluid,
             fin_type_key=fin_key,
             L_tube_m=L_tube_m,
@@ -198,15 +235,15 @@ errors: list[str] = []
 try:
     if mode == "Design":
         T_air_out = st.session_state.get("T_air_out_d", 55.0)
-        if T_air_out <= T_air_in:
-            errors.append("Air outlet temperature must be > air inlet temperature.")
+        if T_air_out <= T_air_in_eff:
+            errors.append("Air outlet temperature must be > effective air inlet temperature.")
         elif T_proc_out >= T_proc_in:
             errors.append("Process outlet temperature must be < inlet temperature.")
         else:
             result = design_bundle(
                 Q_kW=Q_kW,
                 T_proc_in=T_proc_in, T_proc_out=T_proc_out,
-                T_air_in=T_air_in,   T_air_out=T_air_out,
+                T_air_in=T_air_in_eff, T_air_out=T_air_out,
                 fluid_proc=fluid,
                 fin_type_key=fin_key,
                 n_rows=n_rows, L_tube_m=L_tube_m, n_passes=n_passes,
@@ -227,7 +264,7 @@ try:
             geom=geom,
             T_proc_in=T_proc_in, m_proc_kgs=m_proc_kgs,
             fluid_proc=fluid,
-            T_air_in=T_air_in, m_air_kgs=m_air_kgs,
+            T_air_in=T_air_in_eff, m_air_kgs=m_air_kgs,
             altitude_m=altitude_m,
             Rf_air=Rf_air, Rf_tube=Rf_tube, k_wall=k_wall,
         )
@@ -320,6 +357,63 @@ if errors:
 if result is not None:
     for w in result.warnings:
         st.warning(w)
+
+# ── KLM / API 661 spec compliance checks ──────────────────────────────────────
+if result is not None:
+    spec_warns = []
+    spec_infos = []
+
+    T_air_in_used = result.T_air_in
+    T_proc_out_r  = result.T_proc_out
+    T_air_out_r   = result.T_air_out if hasattr(result, "T_air_out") else None
+
+    # KLM: product outlet T ≥ air inlet + 10°C
+    approach = T_proc_out_r - T_air_in_used
+    if approach < 10.0:
+        spec_warns.append(
+            f"Minimum approach temperature violated: T_proc_out ({T_proc_out_r:.1f}°C) is only "
+            f"{approach:.1f} K above T_air_in ({T_air_in_used:.1f}°C). "
+            f"KLM spec requires ≥ 10 K."
+        )
+
+    # KLM: air outlet T ≤ 60°C with fans running
+    if T_air_out_r is not None and T_air_out_r > 60.0:
+        spec_warns.append(
+            f"Air outlet temperature {T_air_out_r:.1f}°C exceeds KLM limit of 60°C "
+            f"(fans operating). Risk of damage to fan bearings and blade adjustment mechanism."
+        )
+
+    # KLM: forced draft required if T_proc_out - T_air_in ≥ 15°C
+    if approach >= 15.0 and "Induced" in result.geom.fan_type:
+        spec_warns.append(
+            f"KLM requires forced draft when T_proc_out − T_air_in ≥ 15°C "
+            f"(currently {approach:.1f} K). Switch to forced draft."
+        )
+
+    # KLM: max 8 tube rows
+    if result.geom.n_rows > 8:
+        spec_warns.append(
+            f"KLM spec: maximum 8 rows. Current design uses {result.geom.n_rows} rows — "
+            f"may exceed shipping/structural limits."
+        )
+
+    # Advisory: fan 10% reserve (KLM item 11)
+    spec_infos.append(
+        "Fan sizing note (KLM §Air-Side item 11): specify variable-pitch fans "
+        "capable of providing +10% airflow at constant speed."
+    )
+
+    if recirc_dT == 0.0:
+        spec_infos.append(
+            "Recirculation: if unit is within 30 m of large buildings or obstructions, "
+            "add 1–2°C to air inlet temperature (KLM §Design Considerations item 2)."
+        )
+
+    for w in spec_warns:
+        st.warning(f"⚠ Spec check — {w}")
+    with st.expander("ℹ Spec notes (KLM / API 661)", expanded=False):
+        for info in spec_infos:
+            st.info(info)
 
 # ── Goal-seek results ─────────────────────────────────────────────────────────
 if "gs_error" in st.session_state:
