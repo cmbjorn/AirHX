@@ -296,69 +296,191 @@ if result is not None:
 
 # ── ACHE diagram ──────────────────────────────────────────────────────────────
 def _draw_bundle(res: BundleDesignResult | BundleRatingResult) -> go.Figure:
-    """Simple 2-D side-elevation schematic of one ACHE bay."""
-    fg  = fin_geometry(res.geom.fin_type)
-    nb  = res.geom.n_bays
-    nr  = res.geom.n_rows
-    Lt  = res.geom.L_tube_m
-    tpr = res.geom.n_tubes_row
-    pitch = fg.pitch_m * 1000  # mm
+    """
+    Two-panel schematic:
+      Left  — SIDE ELEVATION (looking along bay-width direction):
+              shows tube length (horizontal), bundle depth, headers, fans.
+      Right — PLAN VIEW (from above): shows footprint (length × total width).
 
-    bay_w = nb * (tpr * pitch)   # total width [mm]
-    row_h = nr * pitch           # bundle depth [mm]
+    Dimensions in metres throughout.
+    """
+    from plotly.subplots import make_subplots
 
-    fig = go.Figure()
+    fg        = fin_geometry(res.geom.fin_type)
+    nb        = res.geom.n_bays
+    nr        = res.geom.n_rows
+    Lt        = res.geom.L_tube_m          # tube length = unit length [m]
+    bay_w     = 2.438                       # standard 8-ft bay width [m]
+    total_w   = nb * bay_w                  # total bay width [m]
+    bundle_d  = nr * fg.pitch_m             # bundle depth (air flow dir) [m]
+    hdr_h     = 0.25                        # header box height [m]
+    forced    = "forced" in res.geom.fan_type.lower()
 
-    # Header boxes
-    hdr_h = row_h * 0.15
-    for side_y in [-(row_h + hdr_h) / 2, (row_h + hdr_h) / 2]:
-        fig.add_shape(type="rect", x0=0, x1=bay_w, y0=side_y, y1=side_y + hdr_h,
-                      fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5)
+    # Fan geometry (2 fans per bay, along tube length)
+    n_fans_bay = 2
+    n_fans     = nb * n_fans_bay
+    # Fan diameter ≈ 0.90 × (face area per fan)^0.5
+    face_area_per_fan = (Lt * bay_w) / n_fans_bay   # m² per fan for one bay
+    fan_d = min(0.90 * math.sqrt(face_area_per_fan * 4 / math.pi), Lt / n_fans_bay * 0.90)
+    fan_d = round(fan_d / 0.3048) * 0.3048          # snap to nearest foot
 
-    # Tube rows (shown as horizontal lines)
+    # Vertical layout (forced draft: fans below bundle)
+    struct_h  = 0.50     # structural steel / fan pedestal above grade
+    plenum_h  = max(0.60, 0.30 * bay_w)   # plenum between fan exit and bundle
+    if forced:
+        bundle_bot = struct_h + 0.40 + plenum_h    # 0.40 = fan ring height
+        air_arrow_y0, air_arrow_y1 = 0.0, struct_h + 0.20
+    else:
+        bundle_bot = struct_h
+        air_arrow_y0 = bundle_bot + hdr_h + bundle_d + hdr_h + 0.1
+        air_arrow_y1 = air_arrow_y0 + 0.40 + plenum_h
+
+    bundle_top = bundle_bot + hdr_h + bundle_d + hdr_h
+    H_total    = bundle_top + (0.40 + plenum_h if not forced else 0.20)
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.70, 0.30],
+        subplot_titles=[
+            f"Side elevation  (1 bay shown of {nb})",
+            f"Plan view — footprint",
+        ],
+        horizontal_spacing=0.06,
+    )
+
+    def sh(shape, row=1, col=1):
+        shape["xref"] = f"x{'' if col==1 else col}"
+        shape["yref"] = f"y{'' if col==1 else col}"
+        fig.add_shape(shape, row=row, col=col)
+
+    def ann(x, y, text, col=1, **kw):
+        fig.add_annotation(x=x, y=y, text=text, showarrow=False,
+                           xref=f"x{'' if col==1 else col}",
+                           yref=f"y{'' if col==1 else col}", **kw)
+
+    # ── LEFT: side elevation ──────────────────────────────────────────────────
+    # Bottom header box
+    sh(dict(type="rect", x0=0, x1=Lt,
+            y0=bundle_bot, y1=bundle_bot + hdr_h,
+            fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5))
+
+    # Tube bundle (light fill)
+    sh(dict(type="rect", x0=0, x1=Lt,
+            y0=bundle_bot + hdr_h, y1=bundle_bot + hdr_h + bundle_d,
+            fillcolor="#f0f5fa", line_color="#b0b8c4", line_width=1))
+
+    # Tube rows as horizontal dashed lines
     for i in range(nr):
-        y = -row_h / 2 + (i + 0.5) * pitch
-        fig.add_shape(type="line", x0=0, x1=bay_w, y0=y, y1=y,
-                      line=dict(color="#aaaaaa", width=1, dash="dot"))
+        ry = bundle_bot + hdr_h + (i + 0.5) * fg.pitch_m
+        sh(dict(type="line", x0=0, x1=Lt, y0=ry, y1=ry,
+                line=dict(color="#aab4c8", width=1, dash="dot")))
 
-    # Fans (forced draft — below; induced — above)
-    n_fans = nb * 2
-    fan_w  = bay_w / n_fans * 0.6
-    fan_y  = -row_h / 2 - hdr_h - pitch * 0.5
-    for i in range(n_fans):
-        cx = (i + 0.5) * bay_w / n_fans
-        fig.add_shape(type="circle",
-                      x0=cx - fan_w/2, y0=fan_y - fan_w/2,
-                      x1=cx + fan_w/2, y1=fan_y + fan_w/2,
-                      fillcolor="#dce4ef", line_color="#2d5f8a", line_width=1.5)
-        fig.add_annotation(x=cx, y=fan_y, text="⊕", showarrow=False,
-                           font=dict(size=10, color="#2d5f8a"))
+    # Top header box
+    sh(dict(type="rect", x0=0, x1=Lt,
+            y0=bundle_bot + hdr_h + bundle_d,
+            y1=bundle_bot + hdr_h + bundle_d + hdr_h,
+            fillcolor="#2d5f8a", line_color="#1e3a5f", line_width=1.5))
 
-    # Labels
-    fig.add_annotation(x=bay_w/2, y=row_h/2 + hdr_h + pitch*0.3,
-                       text=f"{nb} bay{'s' if nb>1 else ''} × {nr} rows × {tpr} tubes/row",
-                       showarrow=False, font=dict(size=11, color="#1e3a5f"))
-    fig.add_annotation(x=bay_w/2, y=fan_y - fan_w/2 - pitch*0.3,
-                       text=f"{n_fans} fans ({res.geom.fan_type})",
-                       showarrow=False, font=dict(size=10, color="#555"))
+    # Fans along tube length
+    for i in range(n_fans_bay):       # show 1 bay worth of fans
+        cx   = Lt / n_fans_bay * (i + 0.5)
+        if forced:
+            cy = struct_h + 0.20
+            fy0, fy1 = cy - fan_d / 2, cy + fan_d / 2
+        else:
+            cy   = bundle_top + plenum_h / 2 + 0.20
+            fy0  = bundle_top + 0.1
+            fy1  = bundle_top + 0.4 + plenum_h
+        sh(dict(type="circle", x0=cx - fan_d/2, y0=fy0,
+                x1=cx + fan_d/2, y1=fy1,
+                fillcolor="#dce4ef", line_color="#2d5f8a", line_width=2))
+        ann(cx, (fy0 + fy1) / 2, "⊕ FAN", col=1,
+            font=dict(size=9, color="#2d5f8a"))
 
-    # Tube-side arrows
-    arrow_y_in  = row_h / 2 + hdr_h * 0.5
-    arrow_y_out = -(row_h / 2 + hdr_h * 0.5)
-    fig.add_annotation(x=bay_w * 0.1, y=arrow_y_in,
-                       text=f"Hot in {res.T_proc_in:.0f}°C",
-                       showarrow=True, ax=0, ay=-20,
-                       font=dict(color="#b52b2b", size=10))
-    fig.add_annotation(x=bay_w * 0.9, y=arrow_y_out,
-                       text=f"Cool out {res.T_proc_out:.0f}°C",
-                       showarrow=True, ax=0, ay=20,
-                       font=dict(color="#3a6fa8", size=10))
+    # Air flow arrows
+    arrow_y_mid = (bundle_bot / 2) if forced else (air_arrow_y0 + air_arrow_y1) / 2
+    for ax_x in [Lt * 0.30, Lt * 0.70]:
+        fig.add_annotation(
+            x=ax_x, y=bundle_bot + hdr_h * 0.5 if forced else bundle_top + hdr_h,
+            ax=ax_x, ay=0.0 if forced else H_total - 0.1,
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True, arrowhead=2, arrowsize=1.2,
+            arrowcolor="#4488aa" if forced else "#4488aa",
+            arrowwidth=2,
+            text="",
+        )
 
+    ann(Lt * 0.5, 0.05, "↑ Air in" if forced else "↑ Air out",
+        col=1, font=dict(size=9, color="#4488aa"))
+
+    # Process fluid labels on header boxes
+    ann(-0.4, bundle_bot + hdr_h * 0.5,
+        f"Hot in\n{res.T_proc_in:.0f}°C", col=1,
+        font=dict(size=9, color="#b52b2b"), align="right")
+    ann(Lt + 0.4, bundle_bot + hdr_h * 0.5,
+        f"Cool out\n{res.T_proc_out:.0f}°C", col=1,
+        font=dict(size=9, color="#3a6fa8"), align="left")
+
+    # Dimension annotations
+    # — tube length (horizontal arrow)
+    fig.add_annotation(
+        x=Lt, y=-0.15, ax=0, ay=-0.15,
+        xref="x", yref="y", axref="x", ayref="y",
+        showarrow=True, arrowhead=2, arrowcolor="#555", arrowwidth=1.5, text="",
+    )
+    fig.add_annotation(
+        x=0, y=-0.15, ax=Lt, ay=-0.15,
+        xref="x", yref="y", axref="x", ayref="y",
+        showarrow=True, arrowhead=2, arrowcolor="#555", arrowwidth=1.5, text="",
+    )
+    ann(Lt / 2, -0.32, f"L = {Lt:.2f} m", col=1,
+        font=dict(size=9, color="#555"))
+
+    # — unit height (vertical annotation)
+    ann(Lt + 0.6, bundle_top / 2, f"H ≈ {bundle_top:.1f} m", col=1,
+        font=dict(size=9, color="#555"))
+
+    # ── RIGHT: plan view (footprint) ──────────────────────────────────────────
+    for ib in range(nb):
+        y0b, y1b = ib * bay_w, (ib + 1) * bay_w
+        sh(dict(type="rect", x0=0, x1=Lt, y0=y0b, y1=y1b,
+                fillcolor="#e8f0f8", line_color="#2d5f8a", line_width=1.5),
+           col=2)
+        # Fan circles (plan view — each fan shown as circle)
+        for j in range(n_fans_bay):
+            cx2 = Lt / n_fans_bay * (j + 0.5)
+            cy2 = y0b + bay_w / 2
+            r2  = fan_d / 2
+            sh(dict(type="circle",
+                    x0=cx2 - r2, y0=cy2 - r2,
+                    x1=cx2 + r2, y1=cy2 + r2,
+                    fillcolor="#dce4ef", line_color="#2d5f8a", line_width=1.5),
+               col=2)
+        ann(Lt / 2, y0b + bay_w / 2,
+            f"Bay {ib+1}", col=2,
+            font=dict(size=8, color="#2d5f8a"))
+
+    # Footprint dimension labels
+    ann(Lt / 2, -0.3,
+        f"L = {Lt:.2f} m", col=2,
+        font=dict(size=8, color="#555"))
+    ann(-0.5, total_w / 2,
+        f"W = {total_w:.2f} m\n({nb}×{bay_w:.2f} m)",
+        col=2, font=dict(size=8, color="#555"), align="right")
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    fig.update_xaxes(visible=False, range=[-0.9, Lt + 1.0], row=1, col=1)
+    fig.update_yaxes(visible=False, range=[-0.5, H_total + 0.3], row=1, col=1)
+    fig.update_xaxes(visible=False, range=[-0.8, Lt + 0.4],
+                     scaleanchor="y2", scaleratio=1, row=1, col=2)
+    fig.update_yaxes(visible=False, range=[-0.5, total_w + 0.4],
+                     row=1, col=2)
     fig.update_layout(
-        showlegend=False, margin=dict(l=20, r=20, t=20, b=20),
-        xaxis=dict(visible=False, range=[-bay_w*0.1, bay_w*1.1]),
-        yaxis=dict(visible=False, scaleanchor="x", scaleratio=1),
-        plot_bgcolor="white", height=280,
+        showlegend=False,
+        plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=35, b=10),
+        height=340,
+        font=dict(family="Arial", size=10),
     )
     return fig
 

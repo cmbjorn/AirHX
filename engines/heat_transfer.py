@@ -78,21 +78,13 @@ def tube_side_htc(
     Pr = fluid.Pr
 
     if Re < 2300:
-        # Laminar, fully developed — slug flow lower bound
+        # Laminar, fully developed
         Nu = 4.36
-    elif Re < 10_000:
-        # Transition — linear blend
-        Nu_lam  = 4.36
-        f_t     = (0.790 * math.log(Re) - 1.64) ** -2
-        Nu_turb = (f_t / 8.0) * (Re - 1000.0) * Pr / (
-                   1.0 + 12.7 * math.sqrt(f_t / 8.0) * (Pr**(2/3) - 1.0))
-        blend   = (Re - 2300.0) / (10_000.0 - 2300.0)
-        Nu      = Nu_lam + blend * (Nu_turb - Nu_lam)
     else:
-        # Gnielinski (1976)
+        # Gnielinski (1976) — valid from Re ≈ 2300 upward (Re-1000 term handles transition)
         f  = (0.790 * math.log(Re) - 1.64) ** -2
-        Nu = (f / 8.0) * (Re - 1000.0) * Pr / (
-              1.0 + 12.7 * math.sqrt(f / 8.0) * (Pr**(2/3) - 1.0))
+        Nu = max(4.36, (f / 8.0) * (Re - 1000.0) * Pr / (
+                        1.0 + 12.7 * math.sqrt(f / 8.0) * (Pr**(2/3) - 1.0)))
 
     return max(1.0, Nu * fluid.k / Di_m)
 
