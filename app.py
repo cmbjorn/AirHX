@@ -8,6 +8,8 @@ import math
 import streamlit as st
 import plotly.graph_objects as go
 
+import pandas as pd
+
 from engines import (
     fluid_properties, LOOP_FLUIDS, FluidProps,
     fin_geometry, FIN_TYPE_KEYS, FIN_TYPE_LABELS,
@@ -18,6 +20,7 @@ from engines import (
     size_pump, ache_tube_dp, pipe_loop_dp,
     size_expansion_vessel,
     size_pipe, pipe_loop_dp as _pipe_dp,
+    GoalSeekRow, goal_seek_design,
 )
 
 st.set_page_config(
@@ -132,6 +135,10 @@ with st.sidebar:
         Rf_tube = st.number_input("Tube-side fouling [×10⁻⁴ m²K/W]", value=1.76, step=0.1) * 1e-4
         k_wall  = st.number_input("Wall conductivity [W/m·K]", value=50.0, step=5.0)
 
+    if mode == "Design":
+        run_gs = st.button("🔍 Goal Seek", use_container_width=True,
+                           help="Sweep row/pass combinations and rank feasible designs.")
+
     st.divider()
 
     # ── Hybrid cooling ──────────────────────────────────────────────────────
@@ -164,6 +171,26 @@ with st.sidebar:
 # ── Compute ───────────────────────────────────────────────────────────────────
 T_proc_mean = 0.5 * (T_proc_in + T_proc_out)
 fluid = fluid_properties(fluid_name, T_proc_mean, custom_fluid)
+
+# Goal-seek: run sweep when button pressed, cache in session_state
+if mode == "Design" and run_gs:
+    T_air_out_gs = st.session_state.get("T_air_out_d", 55.0)
+    try:
+        gs_rows = goal_seek_design(
+            Q_kW=Q_kW,
+            T_proc_in=T_proc_in, T_proc_out=T_proc_out,
+            T_air_in=T_air_in,   T_air_out=T_air_out_gs,
+            fluid_proc=fluid,
+            fin_type_key=fin_key,
+            L_tube_m=L_tube_m,
+            fan_type=fan_type,
+            altitude_m=altitude_m,
+            Rf_air=Rf_air, Rf_tube=Rf_tube, k_wall=k_wall,
+        )
+        st.session_state["gs_rows"] = gs_rows
+    except Exception as exc:
+        st.session_state["gs_rows"] = []
+        st.session_state["gs_error"] = str(exc)
 
 result: BundleDesignResult | BundleRatingResult | None = None
 errors: list[str] = []
@@ -293,6 +320,74 @@ if errors:
 if result is not None:
     for w in result.warnings:
         st.warning(w)
+
+# ── Goal-seek results ─────────────────────────────────────────────────────────
+if "gs_error" in st.session_state:
+    st.error(f"Goal seek error: {st.session_state.pop('gs_error')}")
+
+if "gs_rows" in st.session_state and mode == "Design":
+    gs_rows: list[GoalSeekRow] = st.session_state["gs_rows"]
+    if gs_rows:
+        with st.expander("**🔍 Goal Seek — design candidates**", expanded=True):
+            st.caption(
+                "All feasible (rows, passes) combinations for the current duty. "
+                "Ranked by fewest bays, then air mass flux closest to 5 kg/(m²·s). "
+                "Select a row and click **Apply** to load it into the geometry inputs."
+            )
+
+            # Build display DataFrame
+            rec_idx = next((i for i, r in enumerate(gs_rows) if r.recommended), 0)
+            df_data = []
+            for r in gs_rows:
+                flags = []
+                if r.G_air > 9.0:   flags.append("⚠ G high")
+                if r.G_air < 2.5:   flags.append("⚠ G low")
+                if r.v_tube_ms < 0.3: flags.append("⚠ v low")
+                df_data.append({
+                    "★": "★" if r.recommended else "",
+                    "Bays": r.n_bays,
+                    "Rows": r.n_rows,
+                    "Passes": r.n_passes_eff,
+                    "U  W/m²K": f"{r.U_Wm2K:.1f}",
+                    "G  kg/m²s": f"{r.G_air:.1f}",
+                    "v  m/s": f"{r.v_tube_ms:.2f}",
+                    "Re": f"{r.Re_tube:.0f}",
+                    "A total m²": f"{r.A_total_m2:.0f}",
+                    "Margin": f"{r.area_margin*100:+.0f}%",
+                    "Fan kW": f"{r.P_fan_kW:.1f}",
+                    "Notes": "  ".join(flags),
+                })
+            df = pd.DataFrame(df_data)
+
+            # Colour the recommended row green
+            def _style_row(row):
+                if row["★"] == "★":
+                    return [f"background-color:#d1fae5" for _ in row]
+                return ["" for _ in row]
+
+            st.dataframe(
+                df.style.apply(_style_row, axis=1),
+                use_container_width=True,
+                hide_index=True,
+                height=min(38 * (len(gs_rows) + 1) + 3, 420),
+            )
+
+            # Apply selector
+            labels = [
+                f"{r.n_bays} bay{'s' if r.n_bays>1 else ''} × "
+                f"{r.n_rows} rows × "
+                f"{r.n_passes_eff} passes"
+                + (" ★ Recommended" if r.recommended else "")
+                for r in gs_rows
+            ]
+            sel = st.selectbox("Apply design:", labels,
+                               index=rec_idx, key="gs_sel")
+            if st.button("Apply selected design", type="primary"):
+                sel_idx = labels.index(sel)
+                chosen  = gs_rows[sel_idx]
+                st.session_state["n_rows"]   = chosen.n_rows
+                st.session_state["n_passes"] = chosen.n_passes_eff
+                st.rerun()
 
 # ── ACHE diagram ──────────────────────────────────────────────────────────────
 def _draw_bundle(res: BundleDesignResult | BundleRatingResult) -> go.Figure:

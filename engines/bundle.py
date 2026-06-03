@@ -374,3 +374,116 @@ def rate_bundle(
         P_fan_kW   = Pf,
         warnings   = warnings,
     )
+
+
+# ── Goal-seek ──────────────────────────────────────────────────────────────────
+
+@dataclass
+class GoalSeekRow:
+    """One candidate design from the goal-seek sweep."""
+    n_rows:       int
+    n_passes_req: int   # passes requested (may be auto-raised)
+    n_passes_eff: int   # effective passes used
+    n_bays:       int
+    U_Wm2K:       float
+    G_air:        float
+    v_tube_ms:    float
+    Re_tube:      float
+    A_total_m2:   float
+    A_req_m2:     float
+    area_margin:  float
+    P_fan_kW:     float
+    dP_air_Pa:    float
+    score:        float   # lower = better
+    recommended:  bool    = False
+    warnings:     list[str] = field(default_factory=list)
+
+
+def goal_seek_design(
+    Q_kW:         float,
+    T_proc_in:    float,
+    T_proc_out:   float,
+    T_air_in:     float,
+    T_air_out:    float,
+    fluid_proc:   FluidProps,
+    fin_type_key: str,
+    L_tube_m:     float  = 9.144,
+    fan_type:     str    = "Forced draft",
+    altitude_m:   float  = 0.0,
+    Rf_air:       float  = 9e-6,
+    Rf_tube:      float  = 1.76e-4,
+    k_wall:       float  = 50.0,
+) -> list[GoalSeekRow]:
+    """
+    Sweep (n_rows, n_passes) combinations and return every feasible design,
+    sorted by fewest bays then best G_air (closest to 5 kg/m²s).
+
+    Rows tried: 2, 3, 4, 6, 8.
+    Passes tried: each value in _PASSES_ALLOWED up to 2 × n_rows.
+    The design_bundle auto-escalates passes when the requested value gives
+    laminar flow, so results include the effective pass count.
+
+    Score = n_bays × 1000 + |G_air − 5|×10 + n_passes_eff   (lower = better)
+    """
+    rows_to_try  = [2, 3, 4, 6, 8]
+    passes_to_try = _PASSES_ALLOWED   # [1,2,3,4,6,8,12]
+
+    candidates: list[GoalSeekRow] = []
+    seen_keys: set[tuple] = set()   # (n_bays, n_rows, n_passes_eff) — deduplicate
+
+    for nr in rows_to_try:
+        for np in passes_to_try:
+            if np > nr * 3:          # skip impractical pass counts
+                continue
+            try:
+                r = design_bundle(
+                    Q_kW=Q_kW,
+                    T_proc_in=T_proc_in, T_proc_out=T_proc_out,
+                    T_air_in=T_air_in,   T_air_out=T_air_out,
+                    fluid_proc=fluid_proc,
+                    fin_type_key=fin_type_key,
+                    n_rows=nr, L_tube_m=L_tube_m, n_passes=np,
+                    fan_type=fan_type, altitude_m=altitude_m,
+                    Rf_air=Rf_air, Rf_tube=Rf_tube, k_wall=k_wall,
+                )
+            except Exception:
+                continue
+
+            key = (r.geom.n_bays, nr, r.n_passes_eff)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            score = (r.geom.n_bays * 1000
+                     + abs(r.G_air - 5.0) * 10
+                     + r.n_passes_eff)
+
+            candidates.append(GoalSeekRow(
+                n_rows       = nr,
+                n_passes_req = np,
+                n_passes_eff = r.n_passes_eff,
+                n_bays       = r.geom.n_bays,
+                U_Wm2K       = r.htc.U,
+                G_air        = r.G_air,
+                v_tube_ms    = r.v_tube_ms,
+                Re_tube      = r.Re_tube,
+                A_total_m2   = r.A_total_m2,
+                A_req_m2     = r.A_req_m2,
+                area_margin  = r.area_margin,
+                P_fan_kW     = r.P_fan_kW,
+                dP_air_Pa    = r.dP_air_Pa,
+                score        = score,
+                warnings     = r.warnings,
+            ))
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda x: x.score)
+
+    # Mark the single best row as recommended
+    best = candidates[0]
+    for c in candidates:
+        c.recommended = (c is best)
+
+    return candidates

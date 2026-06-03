@@ -16,6 +16,7 @@ from .heat_transfer import (
 from .bundle import (
     BundleGeometry, BundleDesignResult, BundleRatingResult,
     design_bundle, rate_bundle,
+    GoalSeekRow, goal_seek_design,
 )
 from .hybrid_cooling import HybridMode, HybridResult, hybrid_cooling
 from .pump_sizing import PumpResult, size_pump, ache_tube_dp
